@@ -1,3 +1,22 @@
+// Copyright (c) 2016 DarkDNA
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of
+// this software and associated documentation files (the "Software"), to deal in
+// the Software without restriction, including without limitation the rights to
+// use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+// the Software, and to permit persons to whom the Software is furnished to do so,
+// subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+// FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+// COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+// IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+// CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 package main
 
 import (
@@ -15,6 +34,7 @@ import (
 )
 
 var (
+	bazelPath     = flag.String("bazel-bin", "bazel", "Location of bazel binary")
 	workspacePath = flag.String("workspace", "", "Location of the Bazel workspace.")
 	gopathOut     = flag.String("out-gopath", "", "Defaults to <workspace-path>/.gopath")
 )
@@ -32,7 +52,7 @@ func main() {
 
 	buff := bytes.NewBuffer(nil)
 
-	cmd := exec.Command("bazel", "query", "--output=proto", "-k", `deps(kind("_?go_.* rule", //...))`)
+	cmd := exec.Command(*bazelPath, "query", "--output=proto", "-k", "deps(kind('_?go_.*|proto_compile rule', //...))")
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = buff
 	cmd.Dir = *workspacePath
@@ -40,13 +60,18 @@ func main() {
 	if err := cmd.Run(); err != nil {
 		log.Printf("cmd.Run returned: %s", err)
 	}
- 
+
 	var queryResult build.QueryResult
 	if err := proto.Unmarshal(buff.Bytes(), &queryResult); err != nil {
 		log.Fatal(err)
 	}
 
 	processProto(queryResult)
+}
+
+var protoFileMap = map[string]string{
+	"pb": ".pb.go",
+	"gw": ".pb.gw.go",
 }
 
 func processProto(queryResult build.QueryResult) {
@@ -63,6 +88,20 @@ func processProto(queryResult build.QueryResult) {
 			for _, output := range target.Rule.RuleOutput {
 				if strings.HasSuffix(output, ".go") {
 					genOutputs[*target.Rule.Name] = append(genOutputs[*target.Rule.Name], output)
+				}
+			}
+		}
+
+		if *target.Rule.RuleClass == "proto_compile" {
+			log.Printf("Found proto: %q", *target.Rule.Name)
+			tmp := strings.Split(*target.Rule.Name, ".")
+
+			for _, attr := range target.Rule.Attribute {
+				if *attr.Name == "protos" {
+					for _, val := range attr.StringListValue {
+						genOutputs[*target.Rule.Name] = append(genOutputs[*target.Rule.Name],
+							strings.Replace(val, ".proto", protoFileMap[tmp[len(tmp)-1]], 1))
+					}
 				}
 			}
 		}
@@ -97,6 +136,17 @@ func processProto(queryResult build.QueryResult) {
 		for _, attr := range rule.Attribute {
 			if *attr.Name == "go_prefix" {
 				goPrefix = goPrefixes[ruleWorkspace+*attr.StringValue]
+				break
+			}
+		}
+
+		// Seems go_prefix was made private, grab from the inputs instead.
+		if goPrefix == "" {
+			for _, inp := range rule.RuleInput {
+				if inp[len(inp)-10:] == ":go_prefix" {
+					goPrefix = goPrefixes[inp]
+					break
+				}
 			}
 		}
 
@@ -116,17 +166,16 @@ func processProto(queryResult build.QueryResult) {
 
 					wsPath := *workspacePath
 					if workspace != "" {
-						wsPath = filepath.Join(*workspacePath, "bazel-__main__/external/", workspace[1:])
+						wsPath = filepath.Join(*workspacePath, "bazel-"+filepath.Base(*workspacePath)+"/external/", workspace[1:])
 					}
 
 					if outs, ok := genOutputs[label]; ok {
 						for _, label := range outs {
 							_, lbl, name := parseLabel(label)
 
-							path := filepath.Join(lbl, name)
-							pkgPath := filepath.Join(goPrefix, ruleLabel, ruleName, name)
+							pkgPath := filepath.Join(goPrefix, ruleLabel, ruleName, filepath.Base(name))
 
-							src := filepath.Join(*workspacePath, "bazel-genfiles", lbl, path)
+							src := filepath.Join(*workspacePath, "bazel-genfiles", lbl, name)
 							dest := filepath.Join(*gopathOut, "src", pkgPath)
 
 							if err := recursiveMkdir(filepath.Dir(dest), os.FileMode(0777)); err != nil && !os.IsExist(err) {
@@ -140,7 +189,7 @@ func processProto(queryResult build.QueryResult) {
 						}
 					} else if strings.HasSuffix(name, ".go") {
 						path := filepath.Join(lbl, name)
-						pkgPath := filepath.Join(goPrefix, ruleLabel, ruleName, name)
+						pkgPath := filepath.Join(goPrefix, ruleLabel, ruleName, filepath.Base(name))
 
 						src := filepath.Join(wsPath, path)
 						dest := filepath.Join(*gopathOut, "src", pkgPath)
@@ -171,10 +220,12 @@ func parseLabel(inp string) (workspace string, label string, name string) {
 }
 
 func recursiveMkdir(path string, mode os.FileMode) error {
-	if path != "/" {
-		if err := recursiveMkdir(filepath.Dir(path), mode); err != nil && !os.IsExist(err) {
-			return err
-		}
+	if path == *workspacePath {
+		return nil
+	}
+
+	if err := recursiveMkdir(filepath.Dir(path), mode); err != nil && !os.IsExist(err) {
+		return err
 	}
 
 	return os.Mkdir(path, mode)
