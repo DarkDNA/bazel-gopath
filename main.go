@@ -126,16 +126,19 @@ func processProto(queryResult build.QueryResult) {
 		}
 
 		rule := target.Rule
-		if rule.RuleClass != nil && *rule.RuleClass != "go_library" && *rule.RuleClass != "go_binary" {
+		if rule.RuleClass != nil && *rule.RuleClass != "go_library" {
 			continue
 		}
 
 		ruleWorkspace, ruleLabel, ruleName := parseLabel(*rule.Name)
+		_ = ruleWorkspace
 
 		var goPrefix string
+		var legacy bool
+
 		for _, attr := range rule.Attribute {
-			if *attr.Name == "go_prefix" {
-				goPrefix = goPrefixes[ruleWorkspace+*attr.StringValue]
+			if *attr.Name == "importpath" {
+				goPrefix = *attr.StringValue
 				break
 			}
 		}
@@ -187,9 +190,15 @@ func processProto(queryResult build.QueryResult) {
 								log.Fatalf("Failed to symlink %q -> %q: %s", src, dest, err)
 							}
 						}
-					} else if strings.HasSuffix(name, ".go") {
+					} else if strings.HasSuffix(name, ".go") || strings.HasSuffix(name, ".S") || strings.HasSuffix(name, ".s") || strings.HasSuffix(name, ".h") {
 						path := filepath.Join(lbl, name)
-						pkgPath := filepath.Join(goPrefix, ruleLabel, ruleName, filepath.Base(name))
+						var pkgPath string
+
+						if legacy {
+							pkgPath = filepath.Join(goPrefix, ruleLabel, ruleName, filepath.Base(name))
+						} else {
+							pkgPath = filepath.Join(goPrefix, filepath.Base(name))
+						}
 
 						src := filepath.Join(wsPath, path)
 						dest := filepath.Join(*gopathOut, "src", pkgPath)
