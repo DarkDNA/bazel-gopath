@@ -175,8 +175,13 @@ func processProto(queryResult build.QueryResult) {
 					if outs, ok := genOutputs[label]; ok {
 						for _, label := range outs {
 							_, lbl, name := parseLabel(label)
+							var pkgPath string
 
-							pkgPath := filepath.Join(goPrefix, ruleLabel, ruleName, filepath.Base(name))
+							if legacy {
+								pkgPath = filepath.Join(goPrefix, ruleLabel, ruleName, filepath.Base(name))
+							} else {
+								pkgPath = filepath.Join(goPrefix, filepath.Base(name))
+							}
 
 							src := filepath.Join(*workspacePath, "bazel-genfiles", lbl, name)
 							dest := filepath.Join(*gopathOut, "src", pkgPath)
