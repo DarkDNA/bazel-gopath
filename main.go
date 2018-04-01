@@ -52,7 +52,7 @@ func main() {
 
 	buff := bytes.NewBuffer(nil)
 
-	cmd := exec.Command(*bazelPath, "query", "--output=proto", "-k", "deps(kind('_?go_.*|proto_compile rule', //...))")
+	cmd := exec.Command(*bazelPath, "query", "--output=proto", "-k", "deps(kind('_?go_.*|proto_compile|proto_library rule', //...))")
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = buff
 	cmd.Dir = *workspacePath
@@ -75,6 +75,8 @@ var protoFileMap = map[string]string{
 }
 
 func processProto(queryResult build.QueryResult) {
+	protoSrcs := make(map[string][]string)
+	protoGenSuffix := make(map[string]string)
 	genOutputs := make(map[string][]string)
 	goPrefixes := make(map[string]string)
 
@@ -106,6 +108,24 @@ func processProto(queryResult build.QueryResult) {
 			}
 		}
 
+		if *target.Rule.RuleClass == "proto_library" {
+			for _, attr := range target.Rule.Attribute {
+				if *attr.Name == "srcs" {
+					protoSrcs[*target.Rule.Name] = attr.StringListValue
+				}
+			}
+		}
+
+		if *target.Rule.RuleClass == "go_proto_compiler" {
+			log.Printf("Found proto generator: %q", *target.Rule.Name)
+
+			for _, attr := range target.Rule.Attribute {
+				if *attr.Name == "suffix" {
+					protoGenSuffix[*target.Rule.Name] = *attr.StringValue
+				}
+			}
+		}
+
 		if *target.Rule.RuleClass == "_go_prefix_rule" {
 			for _, attr := range target.Rule.Attribute {
 				if *attr.Name == "prefix" {
@@ -126,7 +146,7 @@ func processProto(queryResult build.QueryResult) {
 		}
 
 		rule := target.Rule
-		if rule.RuleClass != nil && *rule.RuleClass != "go_library" {
+		if rule.RuleClass != nil && *rule.RuleClass != "go_library" && *rule.RuleClass != "go_proto_library" {
 			continue
 		}
 
@@ -162,19 +182,85 @@ func processProto(queryResult build.QueryResult) {
 			ruleName = ""
 		}
 
-		for _, attr := range rule.Attribute {
-			if *attr.Name == "srcs" {
-				for _, label := range attr.StringListValue {
-					workspace, lbl, name := parseLabel(label)
+		if *target.Rule.RuleClass == "go_proto_library" {
+			log.Printf("Found proto: %q", *target.Rule.Name)
+			var srcs []string
+			var generators []string
 
-					wsPath := *workspacePath
-					if workspace != "" {
-						wsPath = filepath.Join(*workspacePath, "bazel-"+filepath.Base(*workspacePath)+"/external/", workspace[1:])
+			for _, attr := range target.Rule.Attribute {
+				if *attr.Name == "proto" {
+					tmp, ok := protoSrcs[*attr.StringValue]
+					if !ok {
+						log.Fatal("Invalid go_proto_library: Missing src: %q", *attr.StringValue)
 					}
 
-					if outs, ok := genOutputs[label]; ok {
-						for _, label := range outs {
-							_, lbl, name := parseLabel(label)
+					srcs = tmp
+				} else if *attr.Name == "compilers" {
+					generators = attr.StringListValue
+				}
+			}
+
+			for _, tmp := range generators {
+				genSuffix, ok := protoGenSuffix[tmp]
+				if !ok {
+					continue
+				}
+
+				for _, label := range srcs {
+					_, lbl, name := parseLabel(label)
+					name = strings.Replace(name, ".proto", genSuffix, 1)
+
+					pkgPath := filepath.Join(goPrefix, filepath.Base(name))
+
+					src := filepath.Join(*workspacePath, "bazel-genfiles", lbl, name)
+					dest := filepath.Join(*gopathOut, "src", pkgPath)
+
+					if err := recursiveMkdir(filepath.Dir(dest), os.FileMode(0777)); err != nil && !os.IsExist(err) {
+						log.Fatalf("Failed to write make parent directories: %s", err)
+					}
+
+					err := os.Symlink(src, dest)
+					if err != nil && !os.IsExist(err) {
+						log.Fatalf("Failed to symlink %q -> %q: %s", src, dest, err)
+					}
+				}
+			}
+		} else if *target.Rule.RuleClass == "go_library" {
+			for _, attr := range rule.Attribute {
+				if *attr.Name == "srcs" {
+					for _, label := range attr.StringListValue {
+						workspace, lbl, name := parseLabel(label)
+
+						wsPath := *workspacePath
+						if workspace != "" {
+							wsPath = filepath.Join(*workspacePath, "bazel-"+filepath.Base(*workspacePath)+"/external/", workspace[1:])
+						}
+
+						if outs, ok := genOutputs[label]; ok {
+							for _, label := range outs {
+								_, lbl, name := parseLabel(label)
+								var pkgPath string
+
+								if legacy {
+									pkgPath = filepath.Join(goPrefix, ruleLabel, ruleName, filepath.Base(name))
+								} else {
+									pkgPath = filepath.Join(goPrefix, filepath.Base(name))
+								}
+
+								src := filepath.Join(*workspacePath, "bazel-genfiles", lbl, name)
+								dest := filepath.Join(*gopathOut, "src", pkgPath)
+
+								if err := recursiveMkdir(filepath.Dir(dest), os.FileMode(0777)); err != nil && !os.IsExist(err) {
+									log.Fatalf("Failed to write make parent directories: %s", err)
+								}
+
+								err := os.Symlink(src, dest)
+								if err != nil && !os.IsExist(err) {
+									log.Fatalf("Failed to symlink %q -> %q: %s", src, dest, err)
+								}
+							}
+						} else if strings.HasSuffix(name, ".go") || strings.HasSuffix(name, ".S") || strings.HasSuffix(name, ".s") || strings.HasSuffix(name, ".h") {
+							path := filepath.Join(lbl, name)
 							var pkgPath string
 
 							if legacy {
@@ -183,7 +269,7 @@ func processProto(queryResult build.QueryResult) {
 								pkgPath = filepath.Join(goPrefix, filepath.Base(name))
 							}
 
-							src := filepath.Join(*workspacePath, "bazel-genfiles", lbl, name)
+							src := filepath.Join(wsPath, path)
 							dest := filepath.Join(*gopathOut, "src", pkgPath)
 
 							if err := recursiveMkdir(filepath.Dir(dest), os.FileMode(0777)); err != nil && !os.IsExist(err) {
@@ -194,27 +280,6 @@ func processProto(queryResult build.QueryResult) {
 							if err != nil && !os.IsExist(err) {
 								log.Fatalf("Failed to symlink %q -> %q: %s", src, dest, err)
 							}
-						}
-					} else if strings.HasSuffix(name, ".go") || strings.HasSuffix(name, ".S") || strings.HasSuffix(name, ".s") || strings.HasSuffix(name, ".h") {
-						path := filepath.Join(lbl, name)
-						var pkgPath string
-
-						if legacy {
-							pkgPath = filepath.Join(goPrefix, ruleLabel, ruleName, filepath.Base(name))
-						} else {
-							pkgPath = filepath.Join(goPrefix, filepath.Base(name))
-						}
-
-						src := filepath.Join(wsPath, path)
-						dest := filepath.Join(*gopathOut, "src", pkgPath)
-
-						if err := recursiveMkdir(filepath.Dir(dest), os.FileMode(0777)); err != nil && !os.IsExist(err) {
-							log.Fatalf("Failed to write make parent directories: %s", err)
-						}
-
-						err := os.Symlink(src, dest)
-						if err != nil && !os.IsExist(err) {
-							log.Fatalf("Failed to symlink %q -> %q: %s", src, dest, err)
 						}
 					}
 				}
