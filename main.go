@@ -37,6 +37,8 @@ var (
 	bazelPath     = flag.String("bazel-bin", "bazel", "Location of bazel binary")
 	workspacePath = flag.String("workspace", "", "Location of the Bazel workspace.")
 	gopathOut     = flag.String("out-gopath", "", "Defaults to <workspace-path>/.gopath")
+
+	bazelExecRoot string
 )
 
 func main() {
@@ -51,14 +53,28 @@ func main() {
 	}
 
 	buff := bytes.NewBuffer(nil)
+	var cmd *exec.Cmd
 
-	cmd := exec.Command(*bazelPath, "query", "--output=proto", "-k", "deps(kind('_?go_.*|proto_compile|proto_library rule', //...))")
+	cmd = exec.Command(*bazelPath, "info", "execution_root")
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = buff
 	cmd.Dir = *workspacePath
 
 	if err := cmd.Run(); err != nil {
-		log.Printf("cmd.Run returned: %s", err)
+		log.Fatalf("Failed to get execution_root: %s", err)
+	}
+
+	bazelExecRoot = strings.TrimRight(buff.String(), "\n\t ")
+
+	buff.Reset()
+
+	cmd = exec.Command(*bazelPath, "query", "--output=proto", "-k", "deps(kind('_?c?go_.*|proto_compile|proto_library rule', //...))")
+	cmd.Stderr = os.Stderr
+	cmd.Stdout = buff
+	cmd.Dir = *workspacePath
+
+	if err := cmd.Run(); err != nil {
+		log.Printf("query failed: %s", err)
 	}
 
 	var queryResult build.QueryResult
@@ -146,7 +162,7 @@ func processProto(queryResult build.QueryResult) {
 		}
 
 		rule := target.Rule
-		if rule.RuleClass != nil && *rule.RuleClass != "go_library" && *rule.RuleClass != "go_proto_library" {
+		if rule.RuleClass != nil && *rule.RuleClass != "go_library" && *rule.RuleClass != "go_proto_library" && *rule.RuleClass != "_cgo_collect_info" {
 			continue
 		}
 
@@ -212,7 +228,7 @@ func processProto(queryResult build.QueryResult) {
 
 					pkgPath := filepath.Join(goPrefix, filepath.Base(name))
 
-					src := filepath.Join(*workspacePath, "bazel-genfiles", lbl, name)
+					src := filepath.Join(*workspacePath, "bazel-bin", lbl, name)
 					dest := filepath.Join(*gopathOut, "src", pkgPath)
 
 					if err := recursiveMkdir(filepath.Dir(dest), os.FileMode(0777)); err != nil && !os.IsExist(err) {
@@ -225,7 +241,7 @@ func processProto(queryResult build.QueryResult) {
 					}
 				}
 			}
-		} else if *target.Rule.RuleClass == "go_library" {
+		} else if *target.Rule.RuleClass == "go_library" || *target.Rule.RuleClass == "_cgo_collect_info" {
 			for _, attr := range rule.Attribute {
 				if *attr.Name == "srcs" {
 					for _, label := range attr.StringListValue {
@@ -233,7 +249,8 @@ func processProto(queryResult build.QueryResult) {
 
 						wsPath := *workspacePath
 						if workspace != "" {
-							wsPath = filepath.Join(*workspacePath, "bazel-"+filepath.Base(*workspacePath)+"/external/", workspace[1:])
+							// wsPath = filepath.Join(*workspacePath, "bazel-"+filepath.Base(*workspacePath)+"/external/", workspace[1:])
+							wsPath = filepath.Join(bazelExecRoot, "external", workspace[1:])
 						}
 
 						if outs, ok := genOutputs[label]; ok {
