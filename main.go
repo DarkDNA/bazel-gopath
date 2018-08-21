@@ -88,7 +88,9 @@ func main() {
 func processProto(queryResult build.QueryResult) {
 	protoSrcs := make(map[string][]string)
 	protoGenSuffix := make(map[string]string)
+
 	genOutputs := make(map[string][]string)
+	genSrcs := make(map[string]string)
 
 	goImportPaths := make(map[string]string)
 	goPrefixes := make(map[string]string)
@@ -103,6 +105,7 @@ func processProto(queryResult build.QueryResult) {
 			for _, output := range target.Rule.RuleOutput {
 				if strings.HasSuffix(output, ".go") {
 					genOutputs[*target.Rule.Name] = append(genOutputs[*target.Rule.Name], output)
+					genSrcs[output] = *target.Rule.Name
 				}
 			}
 		}
@@ -172,8 +175,9 @@ func processProto(queryResult build.QueryResult) {
 			continue
 		}
 
-		ruleWorkspace, ruleLabel, ruleName := parseLabel(*rule.Name)
+		ruleWorkspace, ruleLabel, rawRuleName := parseLabel(*rule.Name)
 		_ = ruleWorkspace
+		ruleName := rawRuleName
 
 		var goPrefix string
 		var legacy bool
@@ -243,15 +247,8 @@ func processProto(queryResult build.QueryResult) {
 						wsPath = filepath.Join(wsPath, "external", ruleWorkspace[1:])
 					}
 
-					var pkgPath string
-
-					if legacy {
-						pkgPath = filepath.Join(goPrefix, ruleLabel, ruleName, filepath.Base(name))
-					} else {
-						pkgPath = filepath.Join(goPrefix, filepath.Base(name))
-					}
-
-					path := filepath.Join(ruleLabel, "linux_amd64_pure_stripped", ruleName+"%", pkgPath)
+					pkgPath := filepath.Join(goPrefix, filepath.Base(name))
+					path := filepath.Join(ruleLabel, "linux_amd64_pure_stripped", rawRuleName+"%", pkgPath)
 
 					src := filepath.Join(wsPath, path)
 					dest := filepath.Join(*gopathOut, "src", pkgPath)
@@ -270,6 +267,11 @@ func processProto(queryResult build.QueryResult) {
 			for _, attr := range rule.Attribute {
 				if *attr.Name == "srcs" {
 					for _, label := range attr.StringListValue {
+						// Handle referencing an output of a generated file directly.
+						if src, ok := genSrcs[label]; ok {
+							label = src
+						}
+
 						workspace, lbl, name := parseLabel(label)
 
 						wsPath := *workspacePath
