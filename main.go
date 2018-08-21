@@ -235,13 +235,12 @@ func processProto(queryResult build.QueryResult) {
 				}
 
 				for _, label := range srcs {
-					workspace, lbl, name := parseLabel(label)
+					_, _, name := parseLabel(label)
 					name = strings.Replace(name, ".proto", genSuffix, 1)
 
 					wsPath := filepath.Join(bazelExecRoot, "bazel-out/k8-fastbuild/bin")
-					if workspace != "" {
-						// wsPath = filepath.Join(*workspacePath, "bazel-"+filepath.Base(*workspacePath)+"/external/", workspace[1:])
-						wsPath = filepath.Join(bazelExecRoot, "bazel-out/k8-fastbuild/bin/external", workspace[1:])
+					if ruleWorkspace != "" {
+						wsPath = filepath.Join(wsPath, "external", ruleWorkspace[1:])
 					}
 
 					var pkgPath string
@@ -252,7 +251,7 @@ func processProto(queryResult build.QueryResult) {
 						pkgPath = filepath.Join(goPrefix, filepath.Base(name))
 					}
 
-					path := filepath.Join(lbl, "linux_amd64_pure_stripped", ruleName+"%", pkgPath)
+					path := filepath.Join(ruleLabel, "linux_amd64_pure_stripped", ruleName+"%", pkgPath)
 
 					src := filepath.Join(wsPath, path)
 					dest := filepath.Join(*gopathOut, "src", pkgPath)
