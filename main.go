@@ -212,6 +212,10 @@ func processProto(queryResult build.QueryResult) {
 			ruleName = ""
 		}
 
+		if strings.Contains(*rule.Name, "/vendor/") {
+			goPrefix = "/vendor/" + goPrefix
+		}
+
 		if *target.Rule.RuleClass == "go_proto_library" {
 			var srcs []string
 			var generators []string
