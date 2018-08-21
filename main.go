@@ -94,6 +94,8 @@ func processProto(queryResult build.QueryResult) {
 	protoSrcs := make(map[string][]string)
 	protoGenSuffix := make(map[string]string)
 	genOutputs := make(map[string][]string)
+
+	goImportPaths := make(map[string]string)
 	goPrefixes := make(map[string]string)
 
 	for _, target := range queryResult.Target {
@@ -149,6 +151,24 @@ func processProto(queryResult build.QueryResult) {
 				}
 			}
 		}
+
+		if *target.Rule.RuleClass == "go_library" {
+			embedImportPath := ""
+			for _, attr := range target.Rule.Attribute {
+				if *attr.Name == "importpath" {
+					embedImportPath = *attr.StringValue
+					break
+				}
+			}
+
+			for _, attr := range target.Rule.Attribute {
+				if *attr.Name == "embed" {
+					for _, val := range attr.StringListValue {
+						goImportPaths[val] = embedImportPath
+					}
+				}
+			}
+		}
 	}
 
 	log.Printf("Discovered following prefixes: ")
@@ -187,6 +207,10 @@ func processProto(queryResult build.QueryResult) {
 					break
 				}
 			}
+		}
+
+		if goPrefix == "" && *rule.RuleClass == "_cgo_collect_info" {
+			goPrefix = goImportPaths[*rule.Name]
 		}
 
 		if goPrefix == "" {
