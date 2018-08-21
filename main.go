@@ -68,7 +68,7 @@ func main() {
 
 	buff.Reset()
 
-	cmd = exec.Command(*bazelPath, "query", "--output=proto", "-k", "deps(kind('_?c?go_.*|proto_compile|proto_library rule', //...))")
+	cmd = exec.Command(*bazelPath, "query", "--output=proto", "-k", "deps(kind('_?c?go_.*|proto_library rule', //...))")
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = buff
 	cmd.Dir = *workspacePath
@@ -83,11 +83,6 @@ func main() {
 	}
 
 	processProto(queryResult)
-}
-
-var protoFileMap = map[string]string{
-	"pb": ".pb.go",
-	"gw": ".pb.gw.go",
 }
 
 func processProto(queryResult build.QueryResult) {
@@ -108,20 +103,6 @@ func processProto(queryResult build.QueryResult) {
 			for _, output := range target.Rule.RuleOutput {
 				if strings.HasSuffix(output, ".go") {
 					genOutputs[*target.Rule.Name] = append(genOutputs[*target.Rule.Name], output)
-				}
-			}
-		}
-
-		if *target.Rule.RuleClass == "proto_compile" {
-			log.Printf("Found proto: %q", *target.Rule.Name)
-			tmp := strings.Split(*target.Rule.Name, ".")
-
-			for _, attr := range target.Rule.Attribute {
-				if *attr.Name == "protos" {
-					for _, val := range attr.StringListValue {
-						genOutputs[*target.Rule.Name] = append(genOutputs[*target.Rule.Name],
-							strings.Replace(val, ".proto", protoFileMap[tmp[len(tmp)-1]], 1))
-					}
 				}
 			}
 		}
@@ -176,6 +157,11 @@ func processProto(queryResult build.QueryResult) {
 		log.Printf("%q -> %q", lbl, pfx)
 	}
 
+	log.Printf("Discovered the following proto suffixes: ")
+	for gen, sfx := range protoGenSuffix {
+		log.Printf("%q -> %q", gen, sfx)
+	}
+
 	for _, target := range queryResult.Target {
 		if target.Rule == nil {
 			continue
@@ -223,7 +209,6 @@ func processProto(queryResult build.QueryResult) {
 		}
 
 		if *target.Rule.RuleClass == "go_proto_library" {
-			log.Printf("Found proto: %q", *target.Rule.Name)
 			var srcs []string
 			var generators []string
 
@@ -231,7 +216,7 @@ func processProto(queryResult build.QueryResult) {
 				if *attr.Name == "proto" {
 					tmp, ok := protoSrcs[*attr.StringValue]
 					if !ok {
-						log.Fatal("Invalid go_proto_library: Missing src: %q", *attr.StringValue)
+						log.Fatalf("Invalid go_proto_library: Missing src: %q", *attr.StringValue)
 					}
 
 					srcs = tmp
@@ -240,19 +225,36 @@ func processProto(queryResult build.QueryResult) {
 				}
 			}
 
+			log.Printf("Found proto: %q (%d files)", *target.Rule.Name, len(srcs))
+
 			for _, tmp := range generators {
 				genSuffix, ok := protoGenSuffix[tmp]
 				if !ok {
+					log.Printf("Missing suffex for generator: %q", tmp)
 					continue
 				}
 
 				for _, label := range srcs {
-					_, lbl, name := parseLabel(label)
+					workspace, lbl, name := parseLabel(label)
 					name = strings.Replace(name, ".proto", genSuffix, 1)
 
-					pkgPath := filepath.Join(goPrefix, filepath.Base(name))
+					wsPath := filepath.Join(bazelExecRoot, "bazel-out/k8-fastbuild/bin")
+					if workspace != "" {
+						// wsPath = filepath.Join(*workspacePath, "bazel-"+filepath.Base(*workspacePath)+"/external/", workspace[1:])
+						wsPath = filepath.Join(bazelExecRoot, "bazel-out/k8-fastbuild/bin/external", workspace[1:])
+					}
 
-					src := filepath.Join(*workspacePath, "bazel-bin", lbl, name)
+					var pkgPath string
+
+					if legacy {
+						pkgPath = filepath.Join(goPrefix, ruleLabel, ruleName, filepath.Base(name))
+					} else {
+						pkgPath = filepath.Join(goPrefix, filepath.Base(name))
+					}
+
+					path := filepath.Join(lbl, "linux_amd64_pure_stripped", ruleName+"%", pkgPath)
+
+					src := filepath.Join(wsPath, path)
 					dest := filepath.Join(*gopathOut, "src", pkgPath)
 
 					if err := recursiveMkdir(filepath.Dir(dest), os.FileMode(0777)); err != nil && !os.IsExist(err) {
